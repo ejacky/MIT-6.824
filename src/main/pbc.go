@@ -3,7 +3,7 @@ package main
 //
 // pbservice client application
 //
-// export GOPATH=~/6.824
+// export GOPATH=~/MIT-6.824/src
 // go build viewd.go
 // go build pbd.go
 // go build pbc.go
@@ -18,7 +18,7 @@ package main
 // and restart them to exercise fault tolerance.
 //
 
-import "6.824/pbservice"
+import "MIT-6.824/src/pbservice"
 import "os"
 import "fmt"
 

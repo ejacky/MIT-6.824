@@ -1,6 +1,6 @@
 package main
 
-// export GOPATH=~/6.824
+// export GOPATH=~/MIT-6.824/src
 // go build lockd.go
 // go build lockc.go
 // ./lockd -p a b &
@@ -12,7 +12,7 @@ package main
 // instead of a and b.
 
 import "time"
-import "6.824/lockservice"
+import "MIT-6.824/src/lockservice"
 import "os"
 import "fmt"
 
