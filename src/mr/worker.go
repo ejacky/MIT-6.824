@@ -1,9 +1,12 @@
 package mr
 
 import (
+	"MIT-6.824/src/util"
 	"encoding/json"
 	"sort"
-	"strings"
+	"strconv"
+	"sync"
+	"time"
 
 	//"encoding/json"
 	"fmt"
@@ -12,7 +15,6 @@ import (
 )
 import "log"
 import "net/rpc"
-import "hash/fnv"
 
 //
 // Map functions return a slice of KeyValue.
@@ -34,11 +36,6 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 //
-func ihash(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32() & 0x7fffffff)
-}
 
 //
 // main/mrworker.go calls this function.
@@ -50,13 +47,29 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// map task
 	// uncomment to send the Example RPC to the coordinator.
-	intermediate := []KeyValue{}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// map phase
+	go handleMap(mapf, &wg)
+
+	// reduce phase
+	go handleReduce(reducef, &wg)
+
+	wg.Wait()
+}
+
+func handleMap(mapf func(string, string) []KeyValue, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	for {
 		task := CallGetMapTask()
 		if task.Done {
-			break
+			time.Sleep(time.Second * 5)
+			continue
 		}
-		filename := task.Filename
+		filename := task.TaskId
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
@@ -71,7 +84,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		encoderMap := make(map[string]*json.Encoder)
 		fileMap := make(map[string]*os.File)
 		for _, kv := range kva {
-			iname := fmt.Sprintf("mr-%d-%d", task.MapNumber, ihash(kv.Key))
+			iname := fmt.Sprintf("mr-%d-%d", util.Ihash(task.TaskId), util.Ihash(kv.Key)%task.NReduce)
 
 			if _, ok := encoderMap[iname]; !ok {
 				// path/to/whatever does not exist
@@ -87,28 +100,38 @@ func Worker(mapf func(string, string) []KeyValue,
 		closeCreateFile(fileMap)
 
 		// commit finished
-		CallFinishMapTask(getMapKeys(encoderMap))
+		CallFinishMapTask(strconv.Itoa(util.Ihash(task.TaskId)))
 	}
+}
+
+func handleReduce(reducef func(string, []string) string, wg *sync.WaitGroup) {
+	defer wg.Done()
 
 	for {
 		reduceTask := CallGetReduceTask()
-		if reduceTask.Done {
-			break
+		if reduceTask.Done || reduceTask.TaskId == "" {
+			time.Sleep(time.Second * 5)
+			continue
 		}
-		rfile, _ := os.Create(reduceTask.Filename)
-		dec := json.NewDecoder(rfile)
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				break
+
+		intermediate := []KeyValue{}
+		for _, mapId := range reduceTask.MapIds {
+			rfileName := fmt.Sprintf("mr-%s-%s", mapId, reduceTask.TaskId)
+			rfile, _ := os.Open(rfileName)
+			dec := json.NewDecoder(rfile)
+
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				intermediate = append(intermediate, kv)
 			}
-			intermediate = append(intermediate, kv)
 		}
 
 		sort.Sort(ByKey(intermediate))
 
-		t := strings.Split(reduceTask.Filename, "-")
-		oname := "mr-out-" + t[2]
+		oname := "mr-out-" + reduceTask.TaskId
 		ofile, _ := os.Create(oname)
 		//fmt.Println(intermediate)
 
@@ -135,7 +158,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 		ofile.Close()
-		CallFinishReduceTask(reduceTask.Filename)
+		CallFinishReduceTask(reduceTask.TaskId)
 	}
 }
 
@@ -150,13 +173,13 @@ func CallGetMapTask() TaskMapReply {
 	call("Coordinator.GetMapTask", &args, &reply)
 
 	// reply.Y should be 100.
-	fmt.Printf("reply.Filename %v\n", reply.Filename)
+	fmt.Printf("reply %v\n", reply)
 	return reply
 }
 
-func CallFinishMapTask(filenames []string) TaskMapReply {
+func CallFinishMapTask(taskId string) TaskMapReply {
 	args := FinishedMapArgs{
-		Filenames: filenames,
+		TaskId: taskId,
 	}
 	// declare a reply structure.
 	reply := TaskMapReply{}
@@ -177,13 +200,13 @@ func CallGetReduceTask() TaskReduceReply {
 	call("Coordinator.GetReduceTask", &args, &reply)
 
 	// reply.Y should be 100.
-	fmt.Printf("reply.Filename %v\n", reply.Filename)
+	fmt.Printf("reply %v\n", reply)
 	return reply
 }
 
-func CallFinishReduceTask(filename string) TaskReduceReply {
+func CallFinishReduceTask(taskId string) TaskReduceReply {
 	args := FinishedReduceArgs{
-		Filename: filename,
+		TaskId: taskId,
 	}
 	// declare a reply structure.
 	reply := TaskReduceReply{}
@@ -191,29 +214,6 @@ func CallFinishReduceTask(filename string) TaskReduceReply {
 	// send the RPC request, wait for the reply.
 	call("Coordinator.FinishReduceTask", &args, &reply)
 	return reply
-}
-
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	call("Coordinator.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
 }
 
 //
@@ -237,15 +237,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
-}
-
-func getMapKeys(m map[string]*json.Encoder) []string {
-	var keys = make([]string, 0, len(m))
-	for key, _ := range m {
-		keys = append(keys, key)
-	}
-
-	return keys
 }
 
 func closeCreateFile(m map[string]*os.File) {
