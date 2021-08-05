@@ -65,7 +65,7 @@ func handleMap(mapf func(string, string) []KeyValue, wg *sync.WaitGroup) {
 
 	for {
 		task := CallGetMapTask()
-		if task.Done {
+		if task.Done || task.TaskId == "" {
 			time.Sleep(time.Second * 5)
 			continue
 		}
@@ -127,6 +127,7 @@ func handleReduce(reducef func(string, []string) string, wg *sync.WaitGroup) {
 				}
 				intermediate = append(intermediate, kv)
 			}
+			rfile.Close()
 		}
 
 		sort.Sort(ByKey(intermediate))
@@ -173,7 +174,7 @@ func CallGetMapTask() TaskMapReply {
 	call("Coordinator.GetMapTask", &args, &reply)
 
 	// reply.Y should be 100.
-	fmt.Printf("reply %v\n", reply)
+	fmt.Printf("GetMapTask %v\n", reply.TaskId)
 	return reply
 }
 
@@ -186,6 +187,8 @@ func CallFinishMapTask(taskId string) TaskMapReply {
 
 	// send the RPC request, wait for the reply.
 	call("Coordinator.FinishMapTask", &args, &reply)
+	fmt.Printf("FinishMapTask %v\n", taskId)
+
 	return reply
 }
 
@@ -200,7 +203,7 @@ func CallGetReduceTask() TaskReduceReply {
 	call("Coordinator.GetReduceTask", &args, &reply)
 
 	// reply.Y should be 100.
-	fmt.Printf("reply %v\n", reply)
+	fmt.Printf("GetReduceTask %v\n", reply)
 	return reply
 }
 
@@ -213,6 +216,8 @@ func CallFinishReduceTask(taskId string) TaskReduceReply {
 
 	// send the RPC request, wait for the reply.
 	call("Coordinator.FinishReduceTask", &args, &reply)
+
+	fmt.Printf("FinishReduceTask %v\n", taskId)
 	return reply
 }
 

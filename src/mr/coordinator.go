@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"MIT-6.824/src/util"
 	"log"
 	"strconv"
 	"sync"
@@ -12,8 +13,9 @@ import "net/http"
 
 type TaskStat int
 
+const WAIT TaskStat = 2
 const FINISHED TaskStat = 1
-const INIT TaskStat = 0
+const GET TaskStat = 0
 
 type Coordinator struct {
 	// Your definitions here.
@@ -25,7 +27,7 @@ type TaskMap struct {
 	nMap  int
 	Queue []string
 	Task  map[string]TaskStat
-	State TaskStat
+	state TaskStat
 	mu    sync.Mutex
 }
 
@@ -38,10 +40,12 @@ func (m *TaskMap) get() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	task := m.Queue[0]
+	taskId := m.Queue[0]
 	m.Queue = m.Queue[1:]
 
-	return task
+	m.Task[strconv.Itoa(util.Ihash(taskId))] = GET
+
+	return taskId
 }
 
 func (m *TaskMap) done(taskId string) {
@@ -50,9 +54,21 @@ func (m *TaskMap) done(taskId string) {
 
 	m.Task[taskId] = FINISHED
 
-	if len(m.Queue) == 0 {
-		m.State = FINISHED
+	if len(m.Queue) == 0 && m.allDone() {
+		m.state = FINISHED
+	} else if len(m.Queue) == 0 {
+		m.state = WAIT
 	}
+}
+
+func (m *TaskMap) allDone() bool {
+
+	for _, task := range m.Task {
+		if task != FINISHED {
+			return false
+		}
+	}
+	return true
 }
 
 type TaskReduce struct {
@@ -75,10 +91,16 @@ func (r *TaskReduce) get() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	task := r.Queue[0]
+	if len(r.Queue) == 0 {
+		return ""
+	}
+
+	taskId := r.Queue[0]
 	r.Queue = r.Queue[1:]
 
-	return task
+	r.Task[taskId] = GET
+
+	return taskId
 }
 
 func (r *TaskReduce) done(taskId string) {
@@ -87,9 +109,21 @@ func (r *TaskReduce) done(taskId string) {
 
 	r.Task[taskId] = FINISHED
 
-	if len(r.Queue) == 0 {
+	if len(r.Queue) == 0 && r.allDone() {
 		r.state = FINISHED
+	} else if len(r.Queue) == 0 {
+		r.state = WAIT
 	}
+}
+
+func (r *TaskReduce) allDone() bool {
+
+	for _, task := range r.Task {
+		if task != FINISHED {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *TaskReduce) getState() TaskStat {
@@ -106,7 +140,7 @@ func (c *Coordinator) init(files []string, nReduce int) {
 }
 
 func (c *Coordinator) GetMapTask(args *Args, reply *TaskMapReply) error {
-	if c.mapTask.State == FINISHED {
+	if c.mapTask.state == FINISHED || c.mapTask.state == WAIT {
 		reply.Done = true
 	} else {
 		reply.NReduce = c.reduceTask.NReduce
@@ -124,7 +158,7 @@ func (c *Coordinator) FinishMapTask(args *FinishedMapArgs, reply *Reply) error {
 }
 
 func (c *Coordinator) GetReduceTask(args *Args, reply *TaskReduceReply) error {
-	if c.reduceTask.state == FINISHED || c.mapTask.State != FINISHED {
+	if c.reduceTask.state == FINISHED || c.reduceTask.state == WAIT || c.mapTask.state != FINISHED {
 		reply.Done = true
 	} else {
 		reply.NReduce = c.reduceTask.NReduce

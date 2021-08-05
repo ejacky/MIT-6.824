@@ -60,7 +60,7 @@ func main() {
 
 	oname := "mr-out-0"
 	ofile, _ := os.Create(oname)
-	fmt.Println(intermediate)
+	// fmt.Println(intermediate)
 	//
 	// call Reduce on each distinct key in intermediate[],
 	// and print the result to mr-out-0.
