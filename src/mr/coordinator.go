@@ -19,7 +19,7 @@ const WAIT TaskStat = 2
 const FINISHED TaskStat = 1
 const GET TaskStat = 0
 
-const Timeout = 30
+const Timeout = 35
 
 type Coordinator struct {
 	// Your definitions here.
@@ -68,7 +68,7 @@ func (m *TaskMap) check() {
 
 		// 开始超过 90 秒，没有上报完成， 重新入队
 		if time.Now().Sub(task.Start).Seconds() > Timeout {
-			fmt.Printf("存在超时的 map 任务,taskId=%v, task= %v", taskId, task)
+			fmt.Printf("存在超时的 map 任务,taskId=%v, task= %v\n", taskId, task)
 			m.Queue = append(m.Queue, taskId)
 			m.Task[taskId].Start = time.Now()
 			m.state = GET

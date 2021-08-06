@@ -66,41 +66,47 @@ func handleMap(mapf func(string, string) []KeyValue, wg *sync.WaitGroup) {
 	for {
 		task := CallGetMapTask()
 		if task.Stat != GET || task.TaskId == "" {
-			time.Sleep(time.Second * 5)
+			time.Sleep(time.Second * 2)
 			continue
 		}
-		filename := task.TaskId
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %v", filename)
-		}
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", filename)
-		}
-		file.Close()
-		kva := mapf(filename, string(content))
 
-		encoderMap := make(map[string]*json.Encoder)
-		fileMap := make(map[string]*os.File)
-		for _, kv := range kva {
-			iname := fmt.Sprintf("mr-%d-%d", util.Ihash(task.TaskId), util.Ihash(kv.Key)%task.NReduce)
+		wg.Add(1)
+		go func(task TaskMapReply) {
+			defer wg.Done()
 
-			if _, ok := encoderMap[iname]; !ok {
-				// path/to/whatever does not exist
-				ifile, _ := os.Create(iname)
-				enc := json.NewEncoder(ifile)
-				encoderMap[iname] = enc
-				fileMap[iname] = ifile
+			filename := task.TaskId
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatalf("cannot open %v", filename)
+			}
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("cannot read %v", filename)
+			}
+			file.Close()
+			kva := mapf(filename, string(content))
+
+			encoderMap := make(map[string]*json.Encoder)
+			fileMap := make(map[string]*os.File)
+			for _, kv := range kva {
+				iname := fmt.Sprintf("mr-%d-%d", util.Ihash(task.TaskId), util.Ihash(kv.Key)%task.NReduce)
+
+				if _, ok := encoderMap[iname]; !ok {
+					// path/to/whatever does not exist
+					ifile, _ := os.Create(iname)
+					enc := json.NewEncoder(ifile)
+					encoderMap[iname] = enc
+					fileMap[iname] = ifile
+				}
+
+				_ = encoderMap[iname].Encode(&kv)
 			}
 
-			_ = encoderMap[iname].Encode(&kv)
-		}
+			closeCreateFile(fileMap)
 
-		closeCreateFile(fileMap)
-
-		// commit finished
-		CallFinishMapTask(strconv.Itoa(util.Ihash(task.TaskId)))
+			// commit finished
+			CallFinishMapTask(strconv.Itoa(util.Ihash(task.TaskId)))
+		}(task)
 	}
 }
 
@@ -110,56 +116,61 @@ func handleReduce(reducef func(string, []string) string, wg *sync.WaitGroup) {
 	for {
 		reduceTask := CallGetReduceTask()
 		if reduceTask.Stat != GET || reduceTask.TaskId == "" {
-			time.Sleep(time.Second * 5)
+			time.Sleep(time.Second * 2)
 			continue
 		}
 
-		intermediate := []KeyValue{}
-		for _, mapId := range reduceTask.MapIds {
-			rfileName := fmt.Sprintf("mr-%s-%s", mapId, reduceTask.TaskId)
-			rfile, _ := os.Open(rfileName)
-			dec := json.NewDecoder(rfile)
+		wg.Add(1)
+		go func(reduceTask TaskReduceReply) {
+			defer wg.Done()
 
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					break
+			intermediate := []KeyValue{}
+			for _, mapId := range reduceTask.MapIds {
+				rfileName := fmt.Sprintf("mr-%s-%s", mapId, reduceTask.TaskId)
+				rfile, _ := os.Open(rfileName)
+				dec := json.NewDecoder(rfile)
+
+				for {
+					var kv KeyValue
+					if err := dec.Decode(&kv); err != nil {
+						break
+					}
+					intermediate = append(intermediate, kv)
 				}
-				intermediate = append(intermediate, kv)
+				rfile.Close()
 			}
-			rfile.Close()
-		}
 
-		sort.Sort(ByKey(intermediate))
+			sort.Sort(ByKey(intermediate))
 
-		oname := "mr-out-" + reduceTask.TaskId
-		ofile, _ := os.Create(oname)
-		//fmt.Println(intermediate)
+			oname := "mr-out-" + reduceTask.TaskId
+			ofile, _ := os.Create(oname)
+			//fmt.Println(intermediate)
 
-		//
-		// call Reduce on each distinct key in intermediate[],
-		// and print the result to mr-out-0.
-		//
-		i := 0
-		for i < len(intermediate) {
-			j := i + 1
-			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-				j++
+			//
+			// call Reduce on each distinct key in intermediate[],
+			// and print the result to mr-out-0.
+			//
+			i := 0
+			for i < len(intermediate) {
+				j := i + 1
+				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intermediate[k].Value)
+				}
+				output := reducef(intermediate[i].Key, values)
+
+				// this is the correct format for each line of Reduce output.
+				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+				i = j
 			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, intermediate[k].Value)
-			}
-			output := reducef(intermediate[i].Key, values)
 
-			// this is the correct format for each line of Reduce output.
-			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
-			i = j
-		}
-
-		ofile.Close()
-		CallFinishReduceTask(reduceTask.TaskId)
+			ofile.Close()
+			CallFinishReduceTask(reduceTask.TaskId)
+		}(reduceTask)
 	}
 }
 
