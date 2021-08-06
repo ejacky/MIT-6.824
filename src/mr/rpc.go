@@ -18,7 +18,7 @@ type Reply struct {
 }
 
 type TaskMapReply struct {
-	Done    bool
+	Stat    TaskStat
 	NReduce int
 	TaskId  string
 }
@@ -32,7 +32,7 @@ type FinishedMapReply struct {
 }
 
 type TaskReduceReply struct {
-	Done    bool
+	Stat    TaskStat
 	NReduce int
 	TaskId  string
 	MapIds  []string

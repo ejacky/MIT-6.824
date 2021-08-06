@@ -65,7 +65,7 @@ func handleMap(mapf func(string, string) []KeyValue, wg *sync.WaitGroup) {
 
 	for {
 		task := CallGetMapTask()
-		if task.Done || task.TaskId == "" {
+		if task.Stat != GET || task.TaskId == "" {
 			time.Sleep(time.Second * 5)
 			continue
 		}
@@ -109,7 +109,7 @@ func handleReduce(reducef func(string, []string) string, wg *sync.WaitGroup) {
 
 	for {
 		reduceTask := CallGetReduceTask()
-		if reduceTask.Done || reduceTask.TaskId == "" {
+		if reduceTask.Stat != GET || reduceTask.TaskId == "" {
 			time.Sleep(time.Second * 5)
 			continue
 		}
@@ -174,7 +174,7 @@ func CallGetMapTask() TaskMapReply {
 	call("Coordinator.GetMapTask", &args, &reply)
 
 	// reply.Y should be 100.
-	fmt.Printf("GetMapTask %v\n", reply.TaskId)
+	fmt.Printf("GetMapTask %v\n", reply)
 	return reply
 }
 

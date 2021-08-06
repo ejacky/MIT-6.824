@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"time"
 )
 import "net"
 import "os"
@@ -19,40 +20,78 @@ const GET TaskStat = 0
 
 type Coordinator struct {
 	// Your definitions here.
-	mapTask    TaskMap
-	reduceTask TaskReduce
+	mapTask    *TaskMap
+	reduceTask *TaskReduce
+}
+
+type Info struct {
+	Start time.Time
+	End   time.Time
+	File  string
 }
 
 type TaskMap struct {
 	nMap  int
 	Queue []string
-	Task  map[string]TaskStat
+	Task  map[string]*Info
 	state TaskStat
 	mu    sync.Mutex
 }
 
 func (m *TaskMap) init(files []string) {
-	m.Queue = append(m.Queue, files...)
-	m.Task = make(map[string]TaskStat, len(files))
+	m.Task = make(map[string]*Info, len(files))
+	for _, file := range files {
+		taskId := strconv.Itoa(util.Ihash(file))
+		m.Task[taskId] = &Info{
+			File: file,
+		}
+
+		m.Queue = append(m.Queue, taskId)
+	}
 }
 
-func (m *TaskMap) get() string {
+func (m *TaskMap) check() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	for taskId, task := range m.Task {
+		if task.Start.IsZero() {
+			continue
+		}
+
+		// 开始超过 90 秒，没有上报完成， 重新入队
+		if time.Now().Sub(task.Start).Seconds() > 90 {
+			m.Queue = append(m.Queue, taskId)
+		}
+	}
+}
+
+func (m *TaskMap) get() string {
+	if len(m.Queue) == 0 {
+		return ""
+	}
 	taskId := m.Queue[0]
 	m.Queue = m.Queue[1:]
 
-	m.Task[strconv.Itoa(util.Ihash(taskId))] = GET
+	m.Task[taskId].Start = time.Now()
 
 	return taskId
+}
+
+func (m *TaskMap) getFileName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	taskId := m.get()
+
+	return m.Task[taskId].File
 }
 
 func (m *TaskMap) done(taskId string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.Task[taskId] = FINISHED
+	m.Task[taskId].End = time.Now()
 
 	if len(m.Queue) == 0 && m.allDone() {
 		m.state = FINISHED
@@ -64,27 +103,53 @@ func (m *TaskMap) done(taskId string) {
 func (m *TaskMap) allDone() bool {
 
 	for _, task := range m.Task {
-		if task != FINISHED {
+		if task.End.IsZero() {
 			return false
 		}
 	}
 	return true
 }
 
+func (m *TaskMap) getState() TaskStat {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.state
+}
+
 type TaskReduce struct {
 	NReduce int
 	Queue   []string
-	Task    map[string]TaskStat
+	Task    map[string]*Info
 	state   TaskStat
 	mu      sync.Mutex
 }
 
 func (r *TaskReduce) init(nReduce int) {
+	r.Task = make(map[string]*Info, nReduce)
 	for i := 0; i < nReduce; i++ {
-		r.Queue = append(r.Queue, strconv.Itoa(i))
+		taskId := strconv.Itoa(i)
+		r.Queue = append(r.Queue, taskId)
+		r.Task[taskId] = &Info{}
 	}
 	r.NReduce = nReduce
-	r.Task = make(map[string]TaskStat, nReduce)
+
+}
+
+func (r *TaskReduce) check() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for taskId, task := range r.Task {
+		if task.Start.IsZero() {
+			continue
+		}
+
+		// 开始超过 90 秒，没有上报完成， 重新入队
+		if time.Now().Sub(task.Start).Seconds() > 90 {
+			r.Queue = append(r.Queue, taskId)
+		}
+	}
 }
 
 func (r *TaskReduce) get() string {
@@ -98,7 +163,7 @@ func (r *TaskReduce) get() string {
 	taskId := r.Queue[0]
 	r.Queue = r.Queue[1:]
 
-	r.Task[taskId] = GET
+	r.Task[taskId].Start = time.Now()
 
 	return taskId
 }
@@ -107,7 +172,7 @@ func (r *TaskReduce) done(taskId string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.Task[taskId] = FINISHED
+	r.Task[taskId].End = time.Now()
 
 	if len(r.Queue) == 0 && r.allDone() {
 		r.state = FINISHED
@@ -119,7 +184,7 @@ func (r *TaskReduce) done(taskId string) {
 func (r *TaskReduce) allDone() bool {
 
 	for _, task := range r.Task {
-		if task != FINISHED {
+		if task.End.IsZero() {
 			return false
 		}
 	}
@@ -140,11 +205,14 @@ func (c *Coordinator) init(files []string, nReduce int) {
 }
 
 func (c *Coordinator) GetMapTask(args *Args, reply *TaskMapReply) error {
-	if c.mapTask.state == FINISHED || c.mapTask.state == WAIT {
-		reply.Done = true
+	if c.mapTask.getState() == FINISHED {
+		reply.Stat = FINISHED
+	} else if c.mapTask.getState() == WAIT {
+		reply.Stat = WAIT
 	} else {
+		reply.Stat = GET
 		reply.NReduce = c.reduceTask.NReduce
-		reply.TaskId = c.mapTask.get()
+		reply.TaskId = c.mapTask.getFileName()
 	}
 
 	return nil
@@ -158,9 +226,12 @@ func (c *Coordinator) FinishMapTask(args *FinishedMapArgs, reply *Reply) error {
 }
 
 func (c *Coordinator) GetReduceTask(args *Args, reply *TaskReduceReply) error {
-	if c.reduceTask.state == FINISHED || c.reduceTask.state == WAIT || c.mapTask.state != FINISHED {
-		reply.Done = true
-	} else {
+	if c.reduceTask.getState() == FINISHED {
+		reply.Stat = FINISHED
+	} else if c.reduceTask.getState() == WAIT || c.mapTask.state != FINISHED {
+		reply.Stat = WAIT
+	} else if c.mapTask.state == FINISHED {
+		reply.Stat = GET
 		reply.NReduce = c.reduceTask.NReduce
 		reply.TaskId = c.reduceTask.get()
 		reply.MapIds = getMapKeys(c.mapTask.Task)
@@ -175,7 +246,7 @@ func (c *Coordinator) FinishReduceTask(args *FinishedReduceArgs, reply *Finished
 	return nil
 }
 
-func getMapKeys(m map[string]TaskStat) []string {
+func getMapKeys(m map[string]*Info) []string {
 	var keys = make([]string, 0, len(m))
 	for key, _ := range m {
 		keys = append(keys, key)
@@ -205,14 +276,19 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
 
 	// Your code here.
 	if c.reduceTask.getState() == FINISHED {
-		ret = true
+		return true
 	}
 
-	return ret
+	if c.mapTask.getState() != FINISHED {
+		c.mapTask.check()
+	} else {
+		c.reduceTask.check()
+	}
+
+	return false
 }
 
 //
@@ -221,7 +297,10 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		mapTask:    &TaskMap{},
+		reduceTask: &TaskReduce{},
+	}
 	c.init(files, nReduce)
 
 	c.server()
