@@ -19,7 +19,7 @@ const WAIT TaskStat = 2
 const FINISHED TaskStat = 1
 const GET TaskStat = 0
 
-const Timeout = 35
+const Timeout = 50
 
 type Coordinator struct {
 	// Your definitions here.
@@ -66,9 +66,9 @@ func (m *TaskMap) check() {
 			continue
 		}
 
-		// 开始超过 90 秒，没有上报完成， 重新入队
+		// 超过 Timeout 秒没有上报完成， 重新入队
 		if time.Now().Sub(task.Start).Seconds() > Timeout {
-			fmt.Printf("存在超时的 map 任务,taskId=%v, task= %v\n", taskId, task)
+			fmt.Printf("存在超时 %v 秒的 map 任务,taskId=%v, task= %v\n", Timeout, taskId, task)
 			m.Queue = append(m.Queue, taskId)
 			m.Task[taskId].Start = time.Now()
 			m.state = GET
@@ -252,9 +252,9 @@ func (c *Coordinator) FinishMapTask(args *FinishedMapArgs, reply *Reply) error {
 func (c *Coordinator) GetReduceTask(args *Args, reply *TaskReduceReply) error {
 	if c.reduceTask.getState() == FINISHED {
 		reply.Stat = FINISHED
-	} else if c.reduceTask.getState() == WAIT || c.mapTask.state != FINISHED {
+	} else if c.reduceTask.getState() == WAIT || c.mapTask.getState() != FINISHED {
 		reply.Stat = WAIT
-	} else if c.mapTask.state == FINISHED {
+	} else if c.mapTask.getState() == FINISHED {
 		reply.Stat = GET
 		reply.NReduce = c.reduceTask.NReduce
 		reply.TaskId = c.reduceTask.get()
