@@ -18,7 +18,7 @@ package raft
 //
 
 import (
-	"fmt"
+	"log"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -28,6 +28,10 @@ import (
 	//	"MIT-6.824/src/labgob"
 	"MIT-6.824/src/labrpc"
 )
+
+const Follower = 0
+const Candidate = 1
+const Leader = 2
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -73,8 +77,8 @@ type Raft struct {
 	term     int
 	votedFor int
 
-	isLeader bool
-	votes    int
+	state int
+	votes int
 
 	receiveVoteReq     chan struct{}
 	receiveHeatBeatReq chan struct{}
@@ -88,7 +92,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	term = rf.term
 
-	return term, rf.isLeader
+	return term, rf.state == Leader
 }
 
 //
@@ -173,20 +177,22 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	// Your code here (2A, 2B).
+	log.Printf("me %d receive %d requstvote, args term  %d\n", rf.me, args.CandidateId, args.Term)
 
 	reply.Term = rf.term
-
 	if rf.term > args.Term {
 		return
 	}
-	fmt.Printf("me %d receive %d requstvote, chang term  %d\n", rf.me, args.CandidateId, args.Term)
+	if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
+		return
+	}
 
 	rf.votedFor = args.CandidateId
 	rf.term = args.Term
-	rf.isLeader = false
+	rf.state = Follower
 
 	reply.VoteGranted = true
 
@@ -215,16 +221,16 @@ type HeatBeatReply struct {
 }
 
 func (rf *Raft) HeatBeat(args *HeatBeatArgs, reply *HeatBeatReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	log.Printf("me %d receive %d heatbeat, args term  %d\n", rf.me, args.LeaderId, args.Term)
 
 	reply.Term = rf.term
 	if rf.term > args.Term {
 		return
 	}
 	rf.term = args.Term
-	fmt.Printf("me %d receive %d heatbeat, chang term  %d\n", rf.me, args.LeaderId, args.Term)
-	rf.isLeader = false
+	rf.state = Follower
 	reply.FollowerId = rf.me
 
 	go func() {
@@ -319,16 +325,18 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
+	ticker := time.NewTicker(30 * time.Millisecond)
 	for rf.killed() == false {
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
-		timer := time.NewTimer(time.Millisecond * time.Duration(rand.Intn(150)+150))
+		//rand.Seed(time.Now().Unix())
+		timer := time.NewTimer(time.Millisecond * time.Duration(rand.Intn(200)+100))
 
 		// 如果收到候选人请求则终止
-		ticker := time.NewTicker(50 * time.Millisecond)
+
 		//done := make(chan bool)
 
 	Loop:
@@ -337,18 +345,18 @@ func (rf *Raft) ticker() {
 			//case <-done:
 			//	break
 			case <-rf.receiveVoteReq: // 收到心跳或是候选人请求
-				//fmt.Printf("receiveVoteReq, me %d , term %d\n", rf.me, rf.term)
-				timer.Stop()
-				ticker.Stop()
-				//go func() {done <- true}()
+			//	//fmt.Printf("receiveVoteReq, me %d , term %d\n", rf.me, rf.term)
+			//timer.Stop()
+			//	ticker.Stop()
+			//	//go func() {done <- true}()
 			case <-rf.receiveHeatBeatReq: // 收到心跳或是候选人请求
-				//fmt.Printf("receiveHeatBeatReq, me %d , term %d\n", rf.me, rf.term)
-				timer.Stop()
-				ticker.Stop()
+			//	//fmt.Printf("receiveHeatBeatReq, me %d , term %d\n", rf.me, rf.term)
+			//	timer.Stop()
+			//	ticker.Stop()
 			case <-ticker.C:
 				// 如果是 leader, 发送心跳
 				//fmt.Printf("me %d ticker, isLeader %t\n", rf.me, rf.isLeader )
-				if rf.isLeader {
+				if rf.state == Leader {
 					for index := range rf.peers {
 						if rf.me == index {
 							continue
@@ -361,27 +369,26 @@ func (rf *Raft) ticker() {
 
 						if reply.Term > rf.term {
 							rf.term = reply.Term
-							rf.isLeader = false
+							rf.state = Follower
 							goto Loop
 						}
-
-						//fmt.Println(reply)
 					}
 				}
 
 				goto Loop
 
 			case <-timer.C:
-				if rf.isLeader || timer.Stop() {
+				if rf.state != Follower {
 					continue
 				}
 
-				ticker.Stop()
+				//ticker.Stop()
 				// 开始选举
-				fmt.Printf("%d start elect, isLeader %t, term %d\n", rf.me, rf.isLeader, rf.term)
+				log.Printf("%d start elect, isLeader %t, term %d\n", rf.me, rf.state == Leader, rf.term)
 
-				rf.isLeader = false
+				rf.state = Candidate
 				rf.votes = 1
+				rf.votedFor = rf.me
 				rf.term++
 				for index := range rf.peers {
 					if index == rf.me {
@@ -400,14 +407,15 @@ func (rf *Raft) ticker() {
 				}
 
 				if rf.votes > len(rf.peers)/2 && rf.votes != 1 { //
-					rf.isLeader = true
+					rf.state = Leader
 				}
-				fmt.Printf("%d end elect, isLeader %t, term %d, vote is %d\n", rf.me, rf.isLeader, rf.term, rf.votes)
+				log.Printf("%d end elect, isLeader %t, term %d, vote is %d\n", rf.me, rf.state == Leader, rf.term, rf.votes)
 				//go func() {done <- true}()
 				//break
 			}
 		}
-
+		timer.Stop()
+		//ticker.Stop()
 	}
 }
 
@@ -430,7 +438,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	// rf.votedFor = -1
+	rf.votedFor = -1
 
 	rf.receiveVoteReq = make(chan struct{})
 	rf.receiveHeatBeatReq = make(chan struct{})
@@ -441,4 +449,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	return rf
+}
+
+func init() {
+	log.SetFlags(log.Lmicroseconds)
 }
