@@ -19,8 +19,9 @@ package raft
 
 import (
 	"log"
-	"math/rand"
+	"math/big"
 	//	"bytes"
+	"crypto/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,26 @@ import (
 const Follower = 0
 const Candidate = 1
 const Leader = 2
+const HeartbeatTimeout = 100
+const Xdd = 150
+
+const TimeoutMin = 250
+const TimeoutMax = 600
+
+const BroadCastHeartBeat = 1
+const BroadCastRequestVote = 2
+
+const (
+	RPCOk        = iota // Remote accepts the RPC
+	RPCRejected         // Remote rejects the RPC
+	RPCLost             // RPC Call function returns false
+	RPCRetracted        // This node regards the RPC as rejected for some reason
+)
+
+func rnd(min int, max int) int {
+	x, _ := rand.Int(rand.Reader, big.NewInt(int64(max-min)))
+	return int(x.Int64()) + min
+}
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -60,7 +81,7 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -70,29 +91,51 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	heartbeat time.Time
-
 	timer time.Timer
 
-	term     int
-	votedFor int
+	term int
 
-	state int
-	votes int
+	voteFor      int
+	receiveVotes int64
+
+	role          int64
+	receivedVotes int
+	leaderId      int64
+
+	lastRPC Timestamp
 
 	receiveVoteReq     chan struct{}
 	receiveHeatBeatReq chan struct{}
 }
 
+type Timestamp struct {
+	mut sync.Mutex
+	t   time.Time
+}
+
+func (at *Timestamp) Set() {
+	at.mut.Lock()
+	defer at.mut.Unlock()
+	at.t = time.Now()
+}
+
+func (at *Timestamp) Get() time.Time {
+	at.mut.Lock()
+	defer at.mut.Unlock()
+	return at.t
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	// Your code here (2A).
-	term = rf.term
+	return rf.term, atomic.LoadInt64(&rf.role) == Leader
+}
 
-	return term, rf.state == Leader
+func (rf *Raft) SetState() {
+
 }
 
 //
@@ -169,36 +212,43 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int
-	VoteGranted bool
+	Term int
 }
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (2A, 2B).
-	log.Printf("me %d receive %d requstvote, args term  %d\n", rf.me, args.CandidateId, args.Term)
-
 	reply.Term = rf.term
+	log.Printf("me %d receive %d requstvote, me term is %d, args term  %d\n", rf.me, args.CandidateId, rf.term, args.Term)
+
 	if rf.term > args.Term {
+		reply.Term = rf.term
 		return
 	}
-	if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
+
+	if rf.term < args.Term {
+		log.Printf("1111 xxxxxxx")
+
+		rf.changeTerm(args.Term, false)
+
+	}
+
+	if rf.voteFor != args.CandidateId && rf.voteFor != -1 {
+		log.Printf("xxxx xxxxxxx")
 		return
 	}
 
-	rf.votedFor = args.CandidateId
-	rf.term = args.Term
-	rf.state = Follower
+	if rf.voteFor == -1 || rf.voteFor == args.CandidateId {
+		rf.voteFor = args.CandidateId
+		rf.lastRPC.Set()
 
-	reply.VoteGranted = true
+		log.Printf("me %d vote to : %d , args term  %d\n", rf.me, args.CandidateId, args.Term)
 
-	go func() {
-		rf.receiveVoteReq <- struct{}{}
-	}()
+	}
 
 	return
 
@@ -216,26 +266,32 @@ type HeatBeatArgs struct {
 //
 type HeatBeatReply struct {
 	// Your data here (2A).
-	Term       int
-	FollowerId int
+	Term int
 }
 
 func (rf *Raft) HeatBeat(args *HeatBeatArgs, reply *HeatBeatReply) {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	log.Printf("me %d receive %d heatbeat, args term  %d\n", rf.me, args.LeaderId, args.Term)
 
 	reply.Term = rf.term
 	if rf.term > args.Term {
 		return
 	}
-	rf.term = args.Term
-	rf.state = Follower
-	reply.FollowerId = rf.me
 
-	go func() {
-		rf.receiveHeatBeatReq <- struct{}{}
-	}()
+	role := atomic.LoadInt64(&rf.role)
+
+	if role == Leader {
+		log.Printf("me %d convert leader to foller , args term  %d\n", rf.me, args.Term)
+	}
+
+	atomic.StoreInt64(&rf.role, Follower)
+	if args.Term > reply.Term {
+		rf.changeTerm(args.Term, false)
+	}
+
+	atomic.StoreInt64(&rf.leaderId, int64(args.LeaderId))
+	rf.lastRPC.Set()
 }
 
 //
@@ -325,7 +381,6 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	ticker := time.NewTicker(30 * time.Millisecond)
 	for rf.killed() == false {
 
 		// Your code here to check if a leader election should
@@ -333,89 +388,142 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 
 		//rand.Seed(time.Now().Unix())
-		timer := time.NewTimer(time.Millisecond * time.Duration(rand.Intn(200)+100))
+		//timer := time.NewTimer(time.Millisecond * time.Duration(rand.Intn(200)+100))
 
-		// 如果收到候选人请求则终止
+		last := rf.lastRPC.Get()
+		time.Sleep(time.Millisecond * time.Duration(rnd(TimeoutMin, TimeoutMax)))
 
-		//done := make(chan bool)
+		curr := rf.lastRPC.Get()
+		if last == curr {
+			if atomic.LoadInt64(&rf.role) != Follower {
+				continue
+			}
 
-	Loop:
-		{
-			select {
-			//case <-done:
-			//	break
-			case <-rf.receiveVoteReq: // 收到心跳或是候选人请求
-			//	//fmt.Printf("receiveVoteReq, me %d , term %d\n", rf.me, rf.term)
-			//timer.Stop()
-			//	ticker.Stop()
-			//	//go func() {done <- true}()
-			case <-rf.receiveHeatBeatReq: // 收到心跳或是候选人请求
-			//	//fmt.Printf("receiveHeatBeatReq, me %d , term %d\n", rf.me, rf.term)
-			//	timer.Stop()
-			//	ticker.Stop()
-			case <-ticker.C:
-				// 如果是 leader, 发送心跳
-				//fmt.Printf("me %d ticker, isLeader %t\n", rf.me, rf.isLeader )
-				if rf.state == Leader {
-					for index := range rf.peers {
-						if rf.me == index {
-							continue
-						}
-						reply := &HeatBeatReply{}
-						rf.sendHeartBeat(index, &HeatBeatArgs{
-							Term:     rf.term,
-							LeaderId: rf.me,
-						}, reply)
-
-						if reply.Term > rf.term {
-							rf.term = reply.Term
-							rf.state = Follower
-							goto Loop
-						}
-					}
-				}
-
-				goto Loop
-
-			case <-timer.C:
-				if rf.state != Follower {
-					continue
-				}
-
-				//ticker.Stop()
-				// 开始选举
-				log.Printf("%d start elect, isLeader %t, term %d\n", rf.me, rf.state == Leader, rf.term)
-
-				rf.state = Candidate
-				rf.votes = 1
-				rf.votedFor = rf.me
+			for !rf.killed() {
+				rf.mu.Lock()
 				rf.term++
-				for index := range rf.peers {
-					if index == rf.me {
-						continue
+
+				term := rf.term
+				atomic.StoreInt64(&rf.role, Candidate)
+				rf.voteFor = rf.me
+
+				rf.mu.Unlock()
+
+				// 开始选举
+				log.Printf("%d start elect, isLeader %t, term %d\n", rf.me, rf.role == Leader, rf.term)
+
+				timeout := time.Millisecond * time.Duration(rnd(TimeoutMin, TimeoutMax))
+				atomic.StoreInt64(&rf.receiveVotes, 1)
+
+				rf.broadcast(BroadCastRequestVote, term)
+
+				startTime := time.Now()
+				for !rf.killed() && atomic.LoadInt64(&rf.role) == Candidate {
+					if time.Since(startTime) > timeout {
+						log.Printf("%d elect timeout, isLeader %t, term %d\n", rf.me, rf.role == Leader, rf.term)
+						break
 					}
 
-					reply := &RequestVoteReply{}
-					rf.sendRequestVote(index, &RequestVoteArgs{
-						Term:        rf.term,
-						CandidateId: rf.me,
-					}, reply)
-
-					if reply.VoteGranted {
-						rf.votes++
+					//log.Printf("%d receive votes  %d\n", rf.me, rf.receiveVotes)
+					if atomic.LoadInt64(&rf.receiveVotes) > int64(len(rf.peers)/2) {
+						log.Printf("%d win, isLeader %t, term %d\n", rf.me, rf.role == Leader, rf.term)
+						atomic.StoreInt64(&rf.role, Leader)
+						atomic.StoreInt64(&rf.leaderId, int64(rf.me))
+						rf.broadcast(BroadCastHeartBeat, term)
 					}
-				}
 
-				if rf.votes > len(rf.peers)/2 && rf.votes != 1 { //
-					rf.state = Leader
+					time.Sleep(time.Millisecond * 10)
 				}
-				log.Printf("%d end elect, isLeader %t, term %d, vote is %d\n", rf.me, rf.state == Leader, rf.term, rf.votes)
-				//go func() {done <- true}()
-				//break
 			}
 		}
-		timer.Stop()
-		//ticker.Stop()
+	}
+}
+
+func (rf *Raft) heartbeat() {
+
+	for {
+		// 发送心跳
+		if term, isLeader := rf.GetState(); isLeader {
+			rf.broadcast(BroadCastHeartBeat, term)
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// when happen to a term greater self term
+func (rf *Raft) changeTerm(term int, needLock bool) {
+	if needLock {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+	}
+
+	rf.term = term
+	atomic.StoreInt64(&rf.role, Follower)
+	rf.voteFor = -1
+}
+
+func (rf *Raft) broadcast(bType int, term int) {
+
+	for index := range rf.peers {
+		if index == rf.me {
+			continue
+		}
+
+		switch bType {
+		case BroadCastHeartBeat:
+			go func(index int) int {
+				reply := &HeatBeatReply{}
+				ok := rf.sendHeartBeat(index, &HeatBeatArgs{
+					Term:     term,
+					LeaderId: rf.me,
+				}, reply)
+
+				if !ok {
+					return RPCLost
+				}
+
+				if reply.Term > rf.term {
+					rf.changeTerm(reply.Term, false)
+					return RPCRetracted
+				}
+
+				return RPCOk
+			}(index)
+		case BroadCastRequestVote:
+			go func(index, term int) int {
+				args := RequestVoteArgs{}
+				reply := RequestVoteReply{}
+
+				args.Term = term
+				ok := rf.sendRequestVote(index, &RequestVoteArgs{
+					Term:        term,
+					CandidateId: rf.me,
+				}, &reply)
+				if !ok {
+					return RPCLost
+				}
+
+				if reply.Term > term {
+					rf.changeTerm(reply.Term, true)
+					return RPCRetracted
+				}
+
+				rf.mu.RLock()
+				defer rf.mu.Unlock()
+
+				if atomic.LoadInt64(&rf.role) != Candidate || rf.term != term {
+					return RPCRetracted
+				}
+
+				if reply.Term == term {
+					atomic.AddInt64(&rf.receiveVotes, 1)
+					return RPCOk
+				}
+
+				return RPCRejected
+			}(index, term)
+		}
 	}
 }
 
@@ -438,15 +546,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.votedFor = -1
+	rf.role = Follower
 
-	rf.receiveVoteReq = make(chan struct{})
-	rf.receiveHeatBeatReq = make(chan struct{})
+	rf.lastRPC.Set()
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.heartbeat()
 
 	return rf
 }
