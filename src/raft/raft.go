@@ -222,7 +222,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// Your code here (2A, 2B).
-	reply.Term = rf.term
+	reply.Term = args.Term
 	log.Printf("me %d receive %d requstvote, me term is %d, args term  %d\n", rf.me, args.CandidateId, rf.term, args.Term)
 
 	if rf.term > args.Term {
@@ -233,7 +233,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.term < args.Term {
 		log.Printf("1111 xxxxxxx")
 
-		rf.changeTerm(args.Term, false)
+		rf.changeTerm(args.Term, false, false)
 
 	}
 
@@ -287,7 +287,7 @@ func (rf *Raft) HeatBeat(args *HeatBeatArgs, reply *HeatBeatReply) {
 
 	atomic.StoreInt64(&rf.role, Follower)
 	if args.Term > reply.Term {
-		rf.changeTerm(args.Term, false)
+		rf.changeTerm(args.Term, false, true)
 	}
 
 	atomic.StoreInt64(&rf.leaderId, int64(args.LeaderId))
@@ -423,8 +423,9 @@ func (rf *Raft) ticker() {
 						log.Printf("%d elect timeout, isLeader %t, term %d\n", rf.me, rf.role == Leader, rf.term)
 						break
 					}
+					//log.Printf("333333")
 
-					//log.Printf("%d receive votes  %d\n", rf.me, rf.receiveVotes)
+					log.Printf("%d receive votes  %d\n", rf.me, atomic.LoadInt64(&rf.receiveVotes))
 					if atomic.LoadInt64(&rf.receiveVotes) > int64(len(rf.peers)/2) {
 						log.Printf("%d win, isLeader %t, term %d\n", rf.me, rf.role == Leader, rf.term)
 						atomic.StoreInt64(&rf.role, Leader)
@@ -433,6 +434,10 @@ func (rf *Raft) ticker() {
 					}
 
 					time.Sleep(time.Millisecond * 10)
+				}
+
+				if atomic.LoadInt64(&rf.role) != Candidate {
+					break
 				}
 			}
 		}
@@ -452,7 +457,7 @@ func (rf *Raft) heartbeat() {
 }
 
 // when happen to a term greater self term
-func (rf *Raft) changeTerm(term int, needLock bool) {
+func (rf *Raft) changeTerm(term int, needLock bool, needRefreshRPC bool) {
 	if needLock {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
@@ -461,6 +466,10 @@ func (rf *Raft) changeTerm(term int, needLock bool) {
 	rf.term = term
 	atomic.StoreInt64(&rf.role, Follower)
 	rf.voteFor = -1
+
+	if needRefreshRPC {
+		rf.lastRPC.Set()
+	}
 }
 
 func (rf *Raft) broadcast(bType int, term int) {
@@ -472,7 +481,7 @@ func (rf *Raft) broadcast(bType int, term int) {
 
 		switch bType {
 		case BroadCastHeartBeat:
-			go func(index int) int {
+			go func(index, term int) int {
 				reply := &HeatBeatReply{}
 				ok := rf.sendHeartBeat(index, &HeatBeatArgs{
 					Term:     term,
@@ -483,13 +492,19 @@ func (rf *Raft) broadcast(bType int, term int) {
 					return RPCLost
 				}
 
-				if reply.Term > rf.term {
-					rf.changeTerm(reply.Term, false)
+				rf.mu.RLock()
+				currentTerm := rf.term
+				rf.mu.RUnlock()
+
+				if reply.Term > term {
+					rf.changeTerm(reply.Term, true, true)
+					return RPCRetracted
+				} else if currentTerm > term {
 					return RPCRetracted
 				}
 
 				return RPCOk
-			}(index)
+			}(index, term)
 		case BroadCastRequestVote:
 			go func(index, term int) int {
 				args := RequestVoteArgs{}
@@ -505,18 +520,21 @@ func (rf *Raft) broadcast(bType int, term int) {
 				}
 
 				if reply.Term > term {
-					rf.changeTerm(reply.Term, true)
+					rf.changeTerm(reply.Term, true, true)
 					return RPCRetracted
 				}
 
 				rf.mu.RLock()
-				defer rf.mu.Unlock()
+				defer rf.mu.RUnlock()
 
 				if atomic.LoadInt64(&rf.role) != Candidate || rf.term != term {
 					return RPCRetracted
 				}
+				log.Printf("3333 xxxxxxx reply term : %d, term :%d", reply.Term, term)
 
 				if reply.Term == term {
+					//log.Printf("3333 xxxxxxx")
+
 					atomic.AddInt64(&rf.receiveVotes, 1)
 					return RPCOk
 				}
